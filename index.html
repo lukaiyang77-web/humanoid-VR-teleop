@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<!--
+  Tianyi 2.0 Pro VR Teleoperation — Quest 3 WebXR Frontend
+  Supports: Meta Quest 3, WebXR immersive-vr, WebSocket to Python backend.
+
+  Button mapping (configurable, default for Quest 3 "xr-standard"):
+    buttons[0] = trigger (analog 0..1)
+    buttons[1] = grip/squeeze (analog 0..1)
+    buttons[2] = thumbstick press
+    buttons[3] = primary button (X on left, A on right)
+    buttons[4] = secondary button (Y on left, B on right)
+    buttons[5] = menu button (left controller only)
+
+  Start teleop: press A (right primary)  -> control_active = true
+  Stop teleop:  press B (right secondary) -> stop_teleop = true
+
+  Hand control: trigger or grip value -> 0..1 close ratio
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Tianyi 2.0 Pro — VR Teleop</title>
+<style>
+  :root { --bg: #0a0a0f; --panel: #141420; --border: #2a2a40; --text: #c8c8d4;
+          --accent: #4da6ff; --green: #4dcc6e; --red: #e0556a; --yellow: #e0c040; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif;
+         display:flex; justify-content:center; align-items:center; min-height:100vh; }
+  #app { width:100%; max-width:640px; padding:16px; }
+  h1 { font-size:1.25rem; text-align:center; margin-bottom:12px; color:#fff; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+           padding:14px; margin-bottom:12px; }
+  .panel h2 { font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;
+              color:var(--accent); margin-bottom:8px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  label { font-size:0.78rem; color:#888; min-width:70px; }
+  input[type=text] { flex:1; background:#1a1a2e; color:var(--text); border:1px solid var(--border);
+                     padding:6px 10px; border-radius:4px; font-size:0.85rem; min-width:180px; }
+  button { background:var(--accent); color:#000; border:none; padding:8px 20px; border-radius:6px;
+           font-weight:600; cursor:pointer; font-size:0.85rem; }
+  button:disabled { opacity:0.4; cursor:default; }
+  button.danger { background:var(--red); color:#fff; }
+  .status-dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .status-dot.ok { background:var(--green); }
+  .status-dot.err { background:var(--red); }
+  .status-dot.warn { background:var(--yellow); }
+  .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stat-card { background:#1a1a2e; border-radius:6px; padding:10px; }
+  .stat-card h3 { font-size:0.78rem; color:var(--accent); margin-bottom:6px; }
+  .stat-card .val { font-size:0.72rem; font-family:'Cascadia Code','Fira Code',monospace;
+                    line-height:1.5; word-break:break-all; }
+  .btns-row { display:flex; gap:4px; flex-wrap:wrap; }
+  .btn-tag { font-size:0.65rem; padding:2px 8px; border-radius:3px; background:#1a1a2e;
+             border:1px solid var(--border); color:#888; }
+  .btn-tag.on { background:#1a3a1a; border-color:var(--green); color:var(--green); }
+  #log { max-height:140px; overflow-y:auto; font-size:0.7rem; font-family:monospace;
+         background:#0d0d1a; padding:8px; border-radius:4px; }
+  #log div { padding:1px 0; }
+  #log .ts { color:#666; margin-right:6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Tianyi 2.0 Pro — VR Teleop</h1>
+
+  <!-- Connection -->
+  <div class="panel">
+    <h2>Connection</h2>
+    <div class="row">
+      <label>WebSocket:</label>
+      <input type="text" id="wsUrl" value="ws://localhost:8766" placeholder="ws://host:port">
+      <button id="btnConnect">Connect</button>
+    </div>
+    <div style="margin-top:6px;font-size:0.78rem;">
+      <span>WS: <span class="status-dot warn" id="wsDot"></span><span id="wsStatus">Disconnected</span></span>
+      <span style="margin-left:12px;">VR: <span class="status-dot warn" id="vrDot"></span><span id="vrStatus">Idle</span></span>
+      <span style="margin-left:12px;">Control: <span class="status-dot warn" id="ctrlDot"></span><span id="ctrlStatus">Idle</span></span>
+    </div>
+  </div>
+
+  <!-- VR Entry -->
+  <div class="panel">
+    <h2>VR Session</h2>
+    <button id="btnEnterVR" disabled style="width:100%;padding:12px;">Enter VR</button>
+    <div style="margin-top:4px;font-size:0.7rem;color:#666;" id="vrHint">
+      Open this page on Quest 3 browser via HTTPS. Click "Enter VR" when connected.
+    </div>
+  </div>
+
+  <!-- Controller State -->
+  <div class="panel">
+    <h2>Controllers</h2>
+    <div class="stat-grid">
+      <div class="stat-card">
+        <h3>Left Hand</h3>
+        <div class="val" id="leftState">Not tracked</div>
+      </div>
+      <div class="stat-card">
+        <h3>Right Hand</h3>
+        <div class="val" id="rightState">Not tracked</div>
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <span style="font-size:0.72rem;color:#888;">Buttons: </span>
+      <span class="btns-row" id="btnState">
+        <span class="btn-tag">A</span><span class="btn-tag">B</span>
+        <span class="btn-tag">X</span><span class="btn-tag">Y</span>
+        <span class="btn-tag">T-L</span><span class="btn-tag">T-R</span>
+        <span class="btn-tag">G-L</span><span class="btn-tag">G-R</span>
+      </span>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="panel">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+//  Configuration — adjust if Quest 3 button mapping differs
+// ══════════════════════════════════════════════════════════════════════════════
+const CONFIG = {
+  // Standard WebXR "xr-standard" mapping for Quest 3:
+  //   buttons[0] = trigger (analog)
+  //   buttons[1] = grip/squeeze (analog)
+  //   buttons[2] = thumbstick press
+  //   buttons[3] = primary (A on right, X on left)
+  //   buttons[4] = secondary (B on right, Y on left)
+  //   buttons[5] = menu (left controller)
+  btnIndex: {
+    trigger: 0,
+    grip: 1,
+    thumbstickPress: 2,
+    primary: 3,     // A (right) / X (left)
+    secondary: 4,   // B (right) / Y (left)
+    menu: 5,
+  },
+
+  // Axis indices (thumbstick)
+  axisIndex: {
+    x: 0,
+    y: 1,
+  },
+
+  // Teleop control buttons
+  startButton: { hand: 'right', index: 3 },  // A button = right primary
+  stopButton:  { hand: 'right', index: 4 },  // B button = right secondary
+
+  // WebSocket send interval (ms). 0 = send every XR frame.
+  sendIntervalMs: 0,
+
+  // If true, teleop stays on after A press until B press.
+  // If false, teleop only active while A is held.
+  toggleMode: true,
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  State
+// ══════════════════════════════════════════════════════════════════════════════
+let ws = null;
+let wsConnected = false;
+let xrSession = null;
+let xrRefSpace = null;
+let xrFrame = null;
+let controlActive = false;
+let animFrameId = null;
+let sendTimerId = null;
+
+const leftState = {
+  valid: false, position: [0,0,0], quaternion: [0,0,0,1],
+  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0],
+};
+const rightState = {
+  valid: false, position: [0,0,0], quaternion: [0,0,0,1],
+  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0],
+};
+
+let lastPrimaryRight = false;
+let lastSecondaryRight = false;
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  DOM refs
+// ══════════════════════════════════════════════════════════════════════════════
+const $ = (id) => document.getElementById(id);
+const wsUrlInput = $('wsUrl');
+const btnConnect = $('btnConnect');
+const btnEnterVR = $('btnEnterVR');
+const wsDot = $('wsDot');
+const wsStatus = $('wsStatus');
+const vrDot = $('vrDot');
+const vrStatus = $('vrStatus');
+const ctrlDot = $('ctrlDot');
+const ctrlStatus = $('ctrlStatus');
+const leftStateEl = $('leftState');
+const rightStateEl = $('rightState');
+const btnStateEl = $('btnState');
+const logEl = $('log');
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Logging
+// ══════════════════════════════════════════════════════════════════════════════
+function log(msg) {
+  const now = new Date();
+  const ts = now.toTimeString().slice(0,8);
+  const div = document.createElement('div');
+  div.innerHTML = `<span class="ts">${ts}</span>${msg}`;
+  logEl.insertBefore(div, logEl.firstChild);
+  // Keep last 100 lines
+  while (logEl.children.length > 100) logEl.lastChild.remove();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  WebSocket
+// ══════════════════════════════════════════════════════════════════════════════
+function connectWS() {
+  const url = wsUrlInput.value.trim() || 'ws://localhost:8766';
+  if (ws) { ws.close(); }
+
+  log(`Connecting to ${url}...`);
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    wsConnected = true;
+    wsDot.className = 'status-dot ok';
+    wsStatus.textContent = 'Connected';
+    btnEnterVR.disabled = false;
+    log('WebSocket connected');
+  };
+
+  ws.onclose = () => {
+    wsConnected = false;
+    wsDot.className = 'status-dot err';
+    wsStatus.textContent = 'Disconnected';
+    btnEnterVR.disabled = true;
+    log('WebSocket disconnected');
+    // Auto-reconnect after 2s
+    setTimeout(() => { if (!wsConnected) connectWS(); }, 2000);
+  };
+
+  ws.onerror = (e) => {
+    log('WebSocket error');
+  };
+}
+
+btnConnect.addEventListener('click', connectWS);
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  WebXR
+// ══════════════════════════════════════════════════════════════════════════════
+async function checkXRSupport() {
+  if (!navigator.xr) {
+    log('WebXR not available in this browser');
+    $('vrHint').textContent = 'WebXR not available. Use Quest 3 browser.';
+    return false;
+  }
+  const supported = await navigator.xr.isSessionSupported('immersive-vr');
+  if (supported) {
+    btnEnterVR.disabled = !wsConnected;
+    $('vrHint').textContent = 'Ready. Click "Enter VR" to start immersive session.';
+  } else {
+    $('vrHint').textContent = 'immersive-vr not supported on this device.';
+  }
+  return supported;
+}
+
+btnEnterVR.addEventListener('click', async () => {
+  if (!navigator.xr) { log('WebXR not available'); return; }
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures: ['local-floor', 'hand-tracking'],
+      optionalFeatures: [],
+    });
+  } catch (err) {
+    // hand-tracking might fail; retry without
+    try {
+      xrSession = await navigator.xr.requestSession('immersive-vr', {
+        requiredFeatures: ['local-floor'],
+        optionalFeatures: ['hand-tracking'],
+      });
+    } catch (err2) {
+      log(`Failed to start XR session: ${err2.message}`);
+      return;
+    }
+  }
+
+  xrSession.addEventListener('end', onXRSessionEnd);
+  xrSession.addEventListener('inputsourceschange', onInputSourcesChange);
+
+  xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+
+  vrDot.className = 'status-dot ok';
+  vrStatus.textContent = 'Active';
+  btnEnterVR.disabled = true;
+  btnEnterVR.textContent = 'In VR...';
+  log('VR session started');
+
+  xrSession.requestAnimationFrame(onXRFrame);
+});
+
+function onXRSessionEnd() {
+  xrSession = null;
+  xrRefSpace = null;
+  controlActive = false;
+  if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+  if (sendTimerId) { clearInterval(sendTimerId); sendTimerId = null; }
+
+  vrDot.className = 'status-dot warn';
+  vrStatus.textContent = 'Idle';
+  btnEnterVR.disabled = !wsConnected;
+  btnEnterVR.textContent = 'Enter VR';
+  updateControlUI();
+  log('VR session ended');
+}
+
+function onInputSourcesChange(event) {
+  // Handle controller connect/disconnect
+  event.added.forEach(src => log(`Controller added: ${src.handedness}`));
+  event.removed.forEach(src => log(`Controller removed: ${src.handedness}`));
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  XR Frame loop
+// ══════════════════════════════════════════════════════════════════════════════
+function onXRFrame(timestamp, frame) {
+  animFrameId = xrSession.requestAnimationFrame(onXRFrame);
+  xrFrame = frame;
+
+  // Reset tracking flags
+  leftState.valid = false;
+  rightState.valid = false;
+
+  // Process each input source (controller)
+  for (const source of xrSession.inputSources) {
+    const handedness = source.handedness; // 'left' or 'right'
+    const state = handedness === 'left' ? leftState : rightState;
+
+    // Grip space pose
+    if (source.gripSpace) {
+      const pose = frame.getPose(source.gripSpace, xrRefSpace);
+      if (pose) {
+        state.valid = true;
+        const pos = pose.transform.position;
+        const ori = pose.transform.orientation;
+        state.position = [pos.x, pos.y, pos.z];
+        state.quaternion = [ori.x, ori.y, ori.z, ori.w];
+      }
+    }
+
+    // Button state from gamepad
+    if (source.gamepad) {
+      const gp = source.gamepad;
+      const cfg = CONFIG.btnIndex;
+
+      state.trigger = gp.buttons[cfg.trigger]?.value ?? 0;
+      state.grip = gp.buttons[cfg.grip]?.value ?? 0;
+
+      state.buttons = {
+        a: handedness === 'right' && (gp.buttons[cfg.primary]?.pressed ?? false),
+        b: handedness === 'right' && (gp.buttons[cfg.secondary]?.pressed ?? false),
+        x: handedness === 'left' && (gp.buttons[cfg.primary]?.pressed ?? false),
+        y: handedness === 'left' && (gp.buttons[cfg.secondary]?.pressed ?? false),
+      };
+
+      // Also capture axis for thumbstick
+      if (gp.axes && gp.axes.length >= 4) {
+        state.axes = [
+          gp.axes[0] ?? 0, gp.axes[1] ?? 0,
+          gp.axes[2] ?? 0, gp.axes[3] ?? 0,
+        ];
+      }
+    }
+  }
+
+  // Button edge detection for start/stop
+  const rightPrimary = rightState.buttons?.a ?? false;
+  const rightSecondary = rightState.buttons?.b ?? false;
+
+  if (rightPrimary && !lastPrimaryRight) {
+    // A pressed
+    controlActive = true;
+    log('A pressed: teleop START');
+    updateControlUI();
+  }
+  if (rightSecondary && !lastSecondaryRight) {
+    // B pressed — stop immediately, hold position
+    controlActive = false;
+    log('B pressed: teleop STOP (hold position)');
+    updateControlUI();
+    // Send stop flag immediately
+    sendXRState(timestamp);
+  }
+
+  lastPrimaryRight = rightPrimary;
+  lastSecondaryRight = rightSecondary;
+
+  // Update UI at ~10 Hz
+  if (Math.floor(timestamp / 100) !== Math.floor((timestamp - frame?.predictedDisplayTime || 0) / 100)) {
+    updateControllerUI();
+  }
+
+  // Send state
+  sendXRState(timestamp);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Send XR state to backend via WebSocket
+// ══════════════════════════════════════════════════════════════════════════════
+function sendXRState(timestamp) {
+  if (!ws || !wsConnected) return;
+
+  const msg = {
+    type: 'xr_state',
+    timestamp: timestamp / 1000.0,  // ms -> seconds
+    control_active: controlActive,
+    reset_reference: false,
+    stop_teleop: !controlActive && lastSecondaryRight,
+
+    left: {
+      valid: leftState.valid,
+      position: leftState.position,
+      quaternion: leftState.quaternion,
+      trigger: leftState.trigger,
+      grip: leftState.grip,
+      buttons: leftState.buttons,
+      axes: leftState.axes,
+    },
+
+    right: {
+      valid: rightState.valid,
+      position: rightState.position,
+      quaternion: rightState.quaternion,
+      trigger: rightState.trigger,
+      grip: rightState.grip,
+      buttons: rightState.buttons,
+      axes: rightState.axes,
+    },
+  };
+
+  try {
+    ws.send(JSON.stringify(msg));
+  } catch (e) {
+    // Connection likely broken
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  UI updates
+// ══════════════════════════════════════════════════════════════════════════════
+function updateControlUI() {
+  if (controlActive) {
+    ctrlDot.className = 'status-dot ok';
+    ctrlStatus.textContent = 'Active';
+  } else {
+    ctrlDot.className = 'status-dot warn';
+    ctrlStatus.textContent = 'Stopped (hold)';
+  }
+}
+
+function updateControllerUI() {
+  // Left state
+  if (leftState.valid) {
+    const p = leftState.position;
+    leftStateEl.innerHTML =
+      `Pos: [${p[0].toFixed(3)}, ${p[1].toFixed(3)}, ${p[2].toFixed(3)}]<br>` +
+      `Trig: ${leftState.trigger.toFixed(2)} Grip: ${leftState.grip.toFixed(2)}`;
+  } else {
+    leftStateEl.textContent = 'Not tracked';
+  }
+
+  // Right state
+  if (rightState.valid) {
+    const p = rightState.position;
+    rightStateEl.innerHTML =
+      `Pos: [${p[0].toFixed(3)}, ${p[1].toFixed(3)}, ${p[2].toFixed(3)}]<br>` +
+      `Trig: ${rightState.trigger.toFixed(2)} Grip: ${rightState.grip.toFixed(2)}`;
+  } else {
+    rightStateEl.textContent = 'Not tracked';
+  }
+
+  // Button tags
+  const btns = {
+    'A': rightState.buttons?.a ?? false,
+    'B': rightState.buttons?.b ?? false,
+    'X': leftState.buttons?.x ?? false,
+    'Y': leftState.buttons?.y ?? false,
+    'T-L': leftState.trigger > 0.1,
+    'T-R': rightState.trigger > 0.1,
+    'G-L': leftState.grip > 0.1,
+    'G-R': rightState.grip > 0.1,
+  };
+  btnStateEl.innerHTML = Object.entries(btns).map(([name, on]) =>
+    `<span class="btn-tag${on ? ' on' : ''}">${name}</span>`
+  ).join('');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Startup
+// ══════════════════════════════════════════════════════════════════════════════
+log('Tianyi 2.0 Pro VR Teleop frontend loaded');
+checkXRSupport().then(ok => {
+  if (ok) log('WebXR immersive-vr supported');
+  else log('WebXR immersive-vr NOT supported — use Quest 3 browser');
+});
+
+// Auto-connect to default WebSocket
+setTimeout(connectWS, 500);
+</script>
+</body>
+</html>
