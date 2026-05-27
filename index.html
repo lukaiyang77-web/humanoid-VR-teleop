@@ -280,7 +280,12 @@ async function initXRRenderLayer(session) {
   }
 
   session.updateRenderState({
-    baseLayer: new XRWebGLLayer(session, gl),
+    baseLayer: new XRWebGLLayer(session, gl, {
+      alpha: true,
+      antialias: true,
+      depth: true,
+      stencil: false,
+    }),
   });
 }
   
@@ -290,14 +295,25 @@ async function checkXRSupport() {
     $('vrHint').textContent = 'WebXR not available. Use Quest 3 browser.';
     return false;
   }
-  const supported = await navigator.xr.isSessionSupported('immersive-ar');
-  if (supported) {
-    btnEnterVR.disabled = !wsConnected;
-    $('vrHint').textContent = 'Ready. Click "Enter VR" to start immersive session.';
-  } else {
-    $('vrHint').textContent = 'immersive-ar not supported on this device.';
+
+  let arSupported = false;
+
+  try {
+    arSupported = await navigator.xr.isSessionSupported('immersive-ar');
+  } catch (_) {
+    arSupported = false;
   }
-  return supported;
+
+  if (arSupported) {
+    btnEnterVR.disabled = !wsConnected;
+    $('vrHint').textContent = 'Ready. Click "Enter VR" to start transparent AR session.';
+    log('WebXR immersive-ar supported');
+    return true;
+  }
+
+  $('vrHint').textContent = 'immersive-ar not supported. Cannot show passthrough transparent view.';
+  log('WebXR immersive-ar NOT supported');
+  return false;
 }
 
 btnEnterVR.addEventListener('click', async () => {
@@ -307,22 +323,15 @@ btnEnterVR.addEventListener('click', async () => {
   }
 
   try {
-    xrSession = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hand-tracking'],
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: [],
+      optionalFeatures: ['local-floor', 'local', 'hand-tracking'],
     });
+    log('XR session requested: immersive-ar');
   } catch (err) {
-    log(`immersive-vr failed: ${err.message}`);
-
-    try {
-      xrSession = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['local-floor'],
-        optionalFeatures: ['hand-tracking'],
-      });
-    } catch (err2) {
-      log(`Failed to start XR session: ${err2.message}`);
-      return;
-    }
+    log(`immersive-ar failed: ${err.message}`);
+    log('透明 passthrough 需要 immersive-ar；不要 fallback 到 immersive-vr');
+    return;
   }
 
   try {
@@ -338,14 +347,21 @@ btnEnterVR.addEventListener('click', async () => {
   xrSession.addEventListener('end', onXRSessionEnd);
   xrSession.addEventListener('inputsourceschange', onInputSourcesChange);
 
-  xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+  try {
+    xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+    log('XR reference space: local-floor');
+  } catch (err) {
+    log(`local-floor failed: ${err.message}, fallback to local`);
+    xrRefSpace = await xrSession.requestReferenceSpace('local');
+  }
 
   vrDot.className = 'status-dot ok';
   vrStatus.textContent = 'Active';
   btnEnterVR.disabled = true;
-  btnEnterVR.textContent = 'In VR...';
-  log('VR session started');
+  btnEnterVR.textContent = 'In AR...';
+  log('AR session started');
 
+  sendXRState(performance.now());
   xrSession.requestAnimationFrame(onXRFrame);
 });
 
@@ -377,10 +393,22 @@ function onXRFrame(timestamp, frame) {
   animFrameId = xrSession.requestAnimationFrame(onXRFrame);
   xrFrame = frame;
 
+  // heartbeat: prove XR frame loop is running
+  if (!window.__xrFrameCount) window.__xrFrameCount = 0;
+  window.__xrFrameCount += 1;
+
+  if (window.__xrFrameCount % 60 === 0) {
+    log(`XR frames: ${window.__xrFrameCount}`);
+  }
+
   if (gl && xrSession.renderState.baseLayer) {
     const layer = xrSession.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+  
+    gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+  
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);  // alpha = 0，透明
+    gl.clearDepth(1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   }
 
