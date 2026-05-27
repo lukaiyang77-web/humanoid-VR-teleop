@@ -166,6 +166,8 @@ let wsConnected = false;
 let xrSession = null;
 let xrRefSpace = null;
 let xrFrame = null;
+let xrCanvas = null;
+let gl = null;
 let controlActive = false;
 let animFrameId = null;
 let sendTimerId = null;
@@ -251,6 +253,37 @@ btnConnect.addEventListener('click', connectWS);
 // ══════════════════════════════════════════════════════════════════════════════
 //  WebXR
 // ══════════════════════════════════════════════════════════════════════════════
+async function initXRRenderLayer(session) {
+  if (!xrCanvas) {
+    xrCanvas = document.createElement('canvas');
+    xrCanvas.style.position = 'fixed';
+    xrCanvas.style.left = '0';
+    xrCanvas.style.top = '0';
+    xrCanvas.style.width = '100%';
+    xrCanvas.style.height = '100%';
+    xrCanvas.style.zIndex = '-1';
+    document.body.appendChild(xrCanvas);
+  }
+
+  gl = xrCanvas.getContext('webgl', {
+    xrCompatible: true,
+    alpha: true,
+    antialias: true,
+  });
+
+  if (!gl) {
+    throw new Error('Failed to create WebGL context');
+  }
+
+  if (gl.makeXRCompatible) {
+    await gl.makeXRCompatible();
+  }
+
+  session.updateRenderState({
+    baseLayer: new XRWebGLLayer(session, gl),
+  });
+}
+  
 async function checkXRSupport() {
   if (!navigator.xr) {
     log('WebXR not available in this browser');
@@ -268,14 +301,19 @@ async function checkXRSupport() {
 }
 
 btnEnterVR.addEventListener('click', async () => {
-  if (!navigator.xr) { log('WebXR not available'); return; }
+  if (!navigator.xr) {
+    log('WebXR not available');
+    return;
+  }
+
   try {
-    xrSession = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: ['local-floor', 'hand-tracking'],
-      optionalFeatures: [],
+    xrSession = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['hand-tracking'],
     });
   } catch (err) {
-    // hand-tracking might fail; retry without
+    log(`immersive-vr failed: ${err.message}`);
+
     try {
       xrSession = await navigator.xr.requestSession('immersive-ar', {
         requiredFeatures: ['local-floor'],
@@ -285,6 +323,16 @@ btnEnterVR.addEventListener('click', async () => {
       log(`Failed to start XR session: ${err2.message}`);
       return;
     }
+  }
+
+  try {
+    await initXRRenderLayer(xrSession);
+  } catch (err) {
+    log(`Failed to init XR render layer: ${err.message}`);
+    try {
+      await xrSession.end();
+    } catch (_) {}
+    return;
   }
 
   xrSession.addEventListener('end', onXRSessionEnd);
@@ -328,6 +376,13 @@ function onInputSourcesChange(event) {
 function onXRFrame(timestamp, frame) {
   animFrameId = xrSession.requestAnimationFrame(onXRFrame);
   xrFrame = frame;
+
+  if (gl && xrSession.renderState.baseLayer) {
+    const layer = xrSession.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  }
 
   // Reset tracking flags
   leftState.valid = false;
