@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
   Tianyi 2.0 Pro VR Teleoperation — Quest 3 WebXR Frontend
-  Supports: Meta Quest 3, WebXR immersive-vr, WebSocket to Python backend.
+  Supports: Meta Quest 3, WebXR immersive-ar, WebSocket to Python backend.
 
   Button mapping (configurable, default for Quest 3 "xr-standard"):
     buttons[0] = trigger (analog 0..1)
@@ -257,12 +257,12 @@ async function checkXRSupport() {
     $('vrHint').textContent = 'WebXR not available. Use Quest 3 browser.';
     return false;
   }
-  const supported = await navigator.xr.isSessionSupported('immersive-vr');
+  const supported = await navigator.xr.isSessionSupported('immersive-ar');
   if (supported) {
     btnEnterVR.disabled = !wsConnected;
     $('vrHint').textContent = 'Ready. Click "Enter VR" to start immersive session.';
   } else {
-    $('vrHint').textContent = 'immersive-vr not supported on this device.';
+    $('vrHint').textContent = 'immersive-ar not supported on this device.';
   }
   return supported;
 }
@@ -270,14 +270,14 @@ async function checkXRSupport() {
 btnEnterVR.addEventListener('click', async () => {
   if (!navigator.xr) { log('WebXR not available'); return; }
   try {
-    xrSession = await navigator.xr.requestSession('immersive-vr', {
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: ['local-floor', 'hand-tracking'],
       optionalFeatures: [],
     });
   } catch (err) {
     // hand-tracking might fail; retry without
     try {
-      xrSession = await navigator.xr.requestSession('immersive-vr', {
+      xrSession = await navigator.xr.requestSession('immersive-ar', {
         requiredFeatures: ['local-floor'],
         optionalFeatures: ['hand-tracking'],
       });
@@ -502,8 +502,8 @@ function updateControllerUI() {
 // ══════════════════════════════════════════════════════════════════════════════
 log('Tianyi 2.0 Pro VR Teleop frontend loaded');
 checkXRSupport().then(ok => {
-  if (ok) log('WebXR immersive-vr supported');
-  else log('WebXR immersive-vr NOT supported — use Quest 3 browser');
+  if (ok) log('WebXR immersive-ar supported');
+  else log('WebXR immersive-ar NOT supported — use Quest 3 browser');
 });
 
 // Auto-connect to default WebSocket
