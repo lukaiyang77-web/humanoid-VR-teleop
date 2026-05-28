@@ -150,8 +150,11 @@ const CONFIG = {
   startButton: { hand: 'right', index: 4 },  // A button = right primary
   stopButton:  { hand: 'right', index: 5 },  // B button = right secondary
 
-  // WebSocket send interval (ms). 0 = send every XR frame.
-  sendIntervalMs: 0,
+  // WebSocket send interval (ms). 33 ~= 30 Hz. Keep this close to backend control_rate_hz.
+  sendIntervalMs: 33,
+
+  // Backend does not need raw button arrays every frame; keep false unless debugging mapping.
+  debugSendRawInput: false,
 
   // If true, teleop stays on after A press until B press.
   // If false, teleop only active while A is held.
@@ -187,6 +190,8 @@ const rightState = {
 
 let lastPrimaryRight = false;
 let lastSecondaryRight = false;
+let stopPulseFrames = 0;
+let lastXrSendAt = -Infinity;
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  DOM refs
@@ -448,7 +453,7 @@ btnEnterVR.addEventListener('click', async () => {
   btnEnterVR.textContent = 'In AR...';
   log('AR session started');
 
-  sendXRState(performance.now());
+  sendXRState(performance.now(), true);
   xrSession.requestAnimationFrame(onXRFrame);
 });
 
@@ -575,9 +580,10 @@ function onXRFrame(timestamp, frame) {
 
   if (rightSecondary && !lastSecondaryRight) {
     controlActive = false;
-    log('B pressed: teleop STOP (hold position)');
+    stopPulseFrames = 6;  // send several frames so backend cannot miss the B event
+    log('B pressed: teleop STOP + zero all arm joints');
     updateControlUI();
-    sendXRState(timestamp);
+    sendXRState(timestamp, true);
   }
 
   lastPrimaryRight = rightPrimary;
@@ -594,15 +600,22 @@ function onXRFrame(timestamp, frame) {
 // ══════════════════════════════════════════════════════════════════════════════
 //  Send XR state to backend via WebSocket
 // ══════════════════════════════════════════════════════════════════════════════
-function sendXRState(timestamp) {
+function sendXRState(timestamp, force = false) {
   if (!ws || !wsConnected || ws.readyState !== WebSocket.OPEN) return;
+
+  if (!force && CONFIG.sendIntervalMs > 0 && (timestamp - lastXrSendAt) < CONFIG.sendIntervalMs) {
+    return;
+  }
+  lastXrSendAt = timestamp;
+
+  const shouldStop = stopPulseFrames > 0;
 
   const msg = {
     type: 'xr_state',
     timestamp: timestamp / 1000.0,  // ms -> seconds
     control_active: controlActive,
     reset_reference: false,
-    stop_teleop: !controlActive && lastSecondaryRight,
+    stop_teleop: shouldStop,
 
     left: {
       valid: leftState.valid,
@@ -612,8 +625,6 @@ function sendXRState(timestamp) {
       grip: leftState.grip,
       buttons: leftState.buttons,
       axes: leftState.axes,
-      raw_buttons: leftState.rawButtons,
-      raw_axes: leftState.rawAxes,
     },
 
     right: {
@@ -624,13 +635,19 @@ function sendXRState(timestamp) {
       grip: rightState.grip,
       buttons: rightState.buttons,
       axes: rightState.axes,
-      raw_buttons: rightState.rawButtons,
-      raw_axes: rightState.rawAxes,
     },
   };
 
+  if (CONFIG.debugSendRawInput) {
+    msg.left.raw_buttons = leftState.rawButtons;
+    msg.left.raw_axes = leftState.rawAxes;
+    msg.right.raw_buttons = rightState.rawButtons;
+    msg.right.raw_axes = rightState.rawAxes;
+  }
+
   try {
     ws.send(JSON.stringify(msg));
+    if (stopPulseFrames > 0) stopPulseFrames -= 1;
   } catch (e) {
     const now = performance.now();
     if (now - lastSendErrorAt > 1000) {
