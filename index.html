@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://benefit-subscriptions-col-martial.trycloudflare.com" placeholder="ws://host:port">
+      <input type="text" id="wsUrl" value="" placeholder="wss://benefit-subscriptions-col-martial.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -82,7 +82,7 @@
   <!-- VR Entry -->
   <div class="panel">
     <h2>VR Session</h2>
-    <button id="btnEnterVR" disabled style="width:100%;padding:12px;">Enter VR</button>
+    <button id="btnEnterVR" disabled style="width:100%;padding:12px;">Enter AR Teleop</button>
     <div style="margin-top:4px;font-size:0.7rem;color:#666;" id="vrHint">
       Open this page on Quest 3 browser via HTTPS. Click "Enter VR" when connected.
     </div>
@@ -171,14 +171,18 @@ let gl = null;
 let controlActive = false;
 let animFrameId = null;
 let sendTimerId = null;
+let reconnectTimer = null;
+let wsSeq = 0;
+let xrSupported = false;
+let lastSendErrorAt = 0;
 
 const leftState = {
   valid: false, position: [0,0,0], quaternion: [0,0,0,1],
-  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0],
+  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0], rawButtons: [], rawAxes: [],
 };
 const rightState = {
   valid: false, position: [0,0,0], quaternion: [0,0,0,1],
-  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0],
+  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0], rawButtons: [], rawAxes: [],
 };
 
 let lastPrimaryRight = false;
@@ -218,33 +222,96 @@ function log(msg) {
 // ══════════════════════════════════════════════════════════════════════════════
 //  WebSocket
 // ══════════════════════════════════════════════════════════════════════════════
-function connectWS() {
-  const url = wsUrlInput.value.trim() || 'ws://localhost:8766';
-  if (ws) { ws.close(); }
+function normalizeWsUrl(raw) {
+  const url = (raw || '').trim();
 
+  if (!url) return '';
+
+  // Users often paste the cloudflared HTTPS URL. Convert it automatically.
+  if (url.startsWith('https://')) return 'wss://' + url.slice('https://'.length).replace(/\/+$/, '');
+  if (url.startsWith('http://')) return 'ws://' + url.slice('http://'.length).replace(/\/+$/, '');
+
+  return url.replace(/\/+$/, '');
+}
+
+function setWsUi(state, text) {
+  wsDot.className = `status-dot ${state}`;
+  wsStatus.textContent = text;
+}
+
+function connectWS() {
+  const url = normalizeWsUrl(wsUrlInput.value);
+
+  if (!url) {
+    setWsUi('warn', 'Need URL');
+    log('WebSocket URL is empty. Paste your wss://...trycloudflare.com address.');
+    return;
+  }
+
+  wsUrlInput.value = url;
+  try {
+    localStorage.setItem('tianyi_ws_url', url);
+  } catch (_) {}
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  // If already connected to the same URL, do nothing.
+  if (ws && ws.readyState === WebSocket.OPEN && ws.url === url) {
+    log(`WebSocket already connected: ${url}`);
+    return;
+  }
+
+  // Invalidate old callbacks before closing an old socket.
+  const seq = ++wsSeq;
+
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    try { ws.close(); } catch (_) {}
+  }
+
+  wsConnected = false;
+  btnEnterVR.disabled = true;
+  setWsUi('warn', 'Connecting');
   log(`Connecting to ${url}...`);
-  ws = new WebSocket(url);
+
+  try {
+    ws = new WebSocket(url);
+  } catch (err) {
+    setWsUi('err', 'Invalid URL');
+    log(`WebSocket create failed: ${err.message}`);
+    return;
+  }
 
   ws.onopen = () => {
+    if (seq !== wsSeq) return;
+
     wsConnected = true;
-    wsDot.className = 'status-dot ok';
-    wsStatus.textContent = 'Connected';
-    btnEnterVR.disabled = false;
+    setWsUi('ok', 'Connected');
+    btnEnterVR.disabled = !xrSupported;
     log('WebSocket connected');
   };
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
+    if (seq !== wsSeq) return;
+
     wsConnected = false;
-    wsDot.className = 'status-dot err';
-    wsStatus.textContent = 'Disconnected';
+    setWsUi('err', `Disconnected ${e.code}`);
     btnEnterVR.disabled = true;
-    log('WebSocket disconnected');
-    // Auto-reconnect after 2s
-    setTimeout(() => { if (!wsConnected) connectWS(); }, 2000);
+    log(`WebSocket disconnected code=${e.code} reason=${e.reason || ''}`);
+
+    // Reconnect only to the current URL. No duplicate close/reconnect loop.
+    reconnectTimer = setTimeout(() => {
+      if (!wsConnected && normalizeWsUrl(wsUrlInput.value) === url) {
+        connectWS();
+      }
+    }, 2000);
   };
 
-  ws.onerror = (e) => {
-    log('WebSocket error');
+  ws.onerror = () => {
+    if (seq !== wsSeq) return;
+    log('WebSocket error — check wss URL, cloudflared tunnel, and backend 8766.');
   };
 }
 
@@ -262,6 +329,7 @@ async function initXRRenderLayer(session) {
     xrCanvas.style.width = '100%';
     xrCanvas.style.height = '100%';
     xrCanvas.style.zIndex = '-1';
+    xrCanvas.style.background = 'transparent';
     document.body.appendChild(xrCanvas);
   }
 
@@ -269,6 +337,10 @@ async function initXRRenderLayer(session) {
     xrCompatible: true,
     alpha: true,
     antialias: true,
+    depth: false,
+    stencil: false,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
   });
 
   if (!gl) {
@@ -279,20 +351,28 @@ async function initXRRenderLayer(session) {
     await gl.makeXRCompatible();
   }
 
-  session.updateRenderState({
-    baseLayer: new XRWebGLLayer(session, gl, {
-      alpha: true,
-      antialias: true,
-      depth: true,
-      stencil: false,
-    }),
+  const layer = new XRWebGLLayer(session, gl, {
+    alpha: true,
+    antialias: true,
+    depth: false,
+    stencil: false,
+    ignoreDepthValues: true,
   });
+
+  session.updateRenderState({
+    baseLayer: layer,
+    depthNear: 0.01,
+    depthFar: 100.0,
+  });
+
+  log(`XR transparent AR render layer initialized, alpha=${gl.getContextAttributes().alpha}`);
 }
   
 async function checkXRSupport() {
   if (!navigator.xr) {
     log('WebXR not available in this browser');
     $('vrHint').textContent = 'WebXR not available. Use Quest 3 browser.';
+    xrSupported = false;
     return false;
   }
 
@@ -300,17 +380,21 @@ async function checkXRSupport() {
 
   try {
     arSupported = await navigator.xr.isSessionSupported('immersive-ar');
-  } catch (_) {
+  } catch (err) {
+    log(`isSessionSupported immersive-ar failed: ${err.message}`);
     arSupported = false;
   }
 
+  xrSupported = arSupported;
+
   if (arSupported) {
     btnEnterVR.disabled = !wsConnected;
-    $('vrHint').textContent = 'Ready. Click "Enter VR" to start transparent AR session.';
+    $('vrHint').textContent = 'Ready. Click "Enter AR Teleop" to start transparent AR session.';
     log('WebXR immersive-ar supported');
     return true;
   }
 
+  btnEnterVR.disabled = true;
   $('vrHint').textContent = 'immersive-ar not supported. Cannot show passthrough transparent view.';
   log('WebXR immersive-ar NOT supported');
   return false;
@@ -322,15 +406,20 @@ btnEnterVR.addEventListener('click', async () => {
     return;
   }
 
+  if (!wsConnected) {
+    log('WebSocket is not connected. Connect WS first.');
+    return;
+  }
+
   try {
     xrSession = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: [],
-      optionalFeatures: ['local-floor', 'local', 'hand-tracking'],
+      optionalFeatures: ['local-floor'],
     });
     log('XR session requested: immersive-ar');
   } catch (err) {
     log(`immersive-ar failed: ${err.message}`);
-    log('透明 passthrough 需要 immersive-ar；不要 fallback 到 immersive-vr');
+    log('Passthrough transparency requires immersive-ar. Not falling back to immersive-vr.');
     return;
   }
 
@@ -338,9 +427,7 @@ btnEnterVR.addEventListener('click', async () => {
     await initXRRenderLayer(xrSession);
   } catch (err) {
     log(`Failed to init XR render layer: ${err.message}`);
-    try {
-      await xrSession.end();
-    } catch (_) {}
+    try { await xrSession.end(); } catch (_) {}
     return;
   }
 
@@ -375,7 +462,7 @@ function onXRSessionEnd() {
   vrDot.className = 'status-dot warn';
   vrStatus.textContent = 'Idle';
   btnEnterVR.disabled = !wsConnected;
-  btnEnterVR.textContent = 'Enter VR';
+  btnEnterVR.textContent = 'Enter AR Teleop';
   updateControlUI();
   log('VR session ended');
 }
@@ -390,10 +477,12 @@ function onInputSourcesChange(event) {
 //  XR Frame loop
 // ══════════════════════════════════════════════════════════════════════════════
 function onXRFrame(timestamp, frame) {
+  if (!xrSession) return;
+
   animFrameId = xrSession.requestAnimationFrame(onXRFrame);
   xrFrame = frame;
 
-  // heartbeat: prove XR frame loop is running
+  // Heartbeat: prove XR frame loop is running.
   if (!window.__xrFrameCount) window.__xrFrameCount = 0;
   window.__xrFrameCount += 1;
 
@@ -404,88 +493,101 @@ function onXRFrame(timestamp, frame) {
   if (gl && xrSession.renderState.baseLayer) {
     const layer = xrSession.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-  
     gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
-  
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);  // alpha = 0，透明
-    gl.clearDepth(1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // Transparent AR clear. Do not paint black.
+    gl.disable(gl.DEPTH_TEST);
+    gl.colorMask(true, true, true, true);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  // Reset tracking flags
+  // Reset tracking flags.
   leftState.valid = false;
   rightState.valid = false;
 
-  // Process each input source (controller)
-  for (const source of xrSession.inputSources) {
-    const handedness = source.handedness; // 'left' or 'right'
-    const state = handedness === 'left' ? leftState : rightState;
+  try {
+    // Process each input source (controller).
+    for (const source of xrSession.inputSources) {
+      const handedness = source.handedness; // 'left' or 'right'
+      if (handedness !== 'left' && handedness !== 'right') continue;
 
-    // Grip space pose
-    if (source.gripSpace) {
-      const pose = frame.getPose(source.gripSpace, xrRefSpace);
-      if (pose) {
-        state.valid = true;
-        const pos = pose.transform.position;
-        const ori = pose.transform.orientation;
-        state.position = [pos.x, pos.y, pos.z];
-        state.quaternion = [ori.x, ori.y, ori.z, ori.w];
+      const state = handedness === 'left' ? leftState : rightState;
+
+      // Grip space pose.
+      if (source.gripSpace && xrRefSpace) {
+        const pose = frame.getPose(source.gripSpace, xrRefSpace);
+        if (pose) {
+          state.valid = true;
+          const pos = pose.transform.position;
+          const ori = pose.transform.orientation;
+          state.position = [pos.x, pos.y, pos.z];
+          state.quaternion = [ori.x, ori.y, ori.z, ori.w];
+        }
       }
-    }
 
-    // Button state from gamepad
-    if (source.gamepad) {
-      const gp = source.gamepad;
-      const cfg = CONFIG.btnIndex;
+      // Button state from gamepad.
+      if (source.gamepad) {
+        const gp = source.gamepad;
+        const cfg = CONFIG.btnIndex;
 
-      state.trigger = gp.buttons[cfg.trigger]?.value ?? 0;
-      state.grip = gp.buttons[cfg.grip]?.value ?? 0;
+        state.trigger = gp.buttons[cfg.trigger]?.value ?? 0;
+        state.grip = gp.buttons[cfg.grip]?.value ?? 0;
 
-      state.buttons = {
-        a: handedness === 'right' && (gp.buttons[cfg.primary]?.pressed ?? false),
-        b: handedness === 'right' && (gp.buttons[cfg.secondary]?.pressed ?? false),
-        x: handedness === 'left' && (gp.buttons[cfg.primary]?.pressed ?? false),
-        y: handedness === 'left' && (gp.buttons[cfg.secondary]?.pressed ?? false),
-      };
+        state.rawButtons = Array.from(gp.buttons || []).map((b, i) => ({
+          i,
+          pressed: !!b.pressed,
+          touched: !!b.touched,
+          value: Number(b.value || 0),
+        }));
 
-      // Also capture axis for thumbstick
-      if (gp.axes && gp.axes.length >= 4) {
+        state.rawAxes = Array.from(gp.axes || []).map(v => Number(v || 0));
+
+        state.buttons = {
+          a: handedness === 'right' && (gp.buttons[cfg.primary]?.pressed ?? false),
+          b: handedness === 'right' && (gp.buttons[cfg.secondary]?.pressed ?? false),
+          x: handedness === 'left' && (gp.buttons[cfg.primary]?.pressed ?? false),
+          y: handedness === 'left' && (gp.buttons[cfg.secondary]?.pressed ?? false),
+        };
+
+        // Capture axes for thumbstick.
         state.axes = [
-          gp.axes[0] ?? 0, gp.axes[1] ?? 0,
-          gp.axes[2] ?? 0, gp.axes[3] ?? 0,
+          gp.axes?.[0] ?? 0,
+          gp.axes?.[1] ?? 0,
+          gp.axes?.[2] ?? 0,
+          gp.axes?.[3] ?? 0,
         ];
       }
     }
+  } catch (err) {
+    log(`XR frame parse error: ${err.message}`);
   }
 
-  // Button edge detection for start/stop
+  // Button edge detection for start/stop.
   const rightPrimary = rightState.buttons?.a ?? false;
   const rightSecondary = rightState.buttons?.b ?? false;
 
   if (rightPrimary && !lastPrimaryRight) {
-    // A pressed
     controlActive = true;
     log('A pressed: teleop START');
     updateControlUI();
   }
+
   if (rightSecondary && !lastSecondaryRight) {
-    // B pressed — stop immediately, hold position
     controlActive = false;
     log('B pressed: teleop STOP (hold position)');
     updateControlUI();
-    // Send stop flag immediately
     sendXRState(timestamp);
   }
 
   lastPrimaryRight = rightPrimary;
   lastSecondaryRight = rightSecondary;
 
-  // Update UI at ~10 Hz
-  if (Math.floor(timestamp / 100) !== Math.floor((timestamp - frame?.predictedDisplayTime || 0) / 100)) {
+  // Update UI at ~10 Hz.
+  if (window.__xrFrameCount % 6 === 0) {
     updateControllerUI();
   }
 
-  // Send state
   sendXRState(timestamp);
 }
 
@@ -493,7 +595,7 @@ function onXRFrame(timestamp, frame) {
 //  Send XR state to backend via WebSocket
 // ══════════════════════════════════════════════════════════════════════════════
 function sendXRState(timestamp) {
-  if (!ws || !wsConnected) return;
+  if (!ws || !wsConnected || ws.readyState !== WebSocket.OPEN) return;
 
   const msg = {
     type: 'xr_state',
@@ -510,6 +612,8 @@ function sendXRState(timestamp) {
       grip: leftState.grip,
       buttons: leftState.buttons,
       axes: leftState.axes,
+      raw_buttons: leftState.rawButtons,
+      raw_axes: leftState.rawAxes,
     },
 
     right: {
@@ -520,13 +624,19 @@ function sendXRState(timestamp) {
       grip: rightState.grip,
       buttons: rightState.buttons,
       axes: rightState.axes,
+      raw_buttons: rightState.rawButtons,
+      raw_axes: rightState.rawAxes,
     },
   };
 
   try {
     ws.send(JSON.stringify(msg));
   } catch (e) {
-    // Connection likely broken
+    const now = performance.now();
+    if (now - lastSendErrorAt > 1000) {
+      log(`WebSocket send failed: ${e.message}`);
+      lastSendErrorAt = now;
+    }
   }
 }
 
@@ -583,14 +693,38 @@ function updateControllerUI() {
 // ══════════════════════════════════════════════════════════════════════════════
 //  Startup
 // ══════════════════════════════════════════════════════════════════════════════
+window.addEventListener('error', (event) => {
+  log(`JS error: ${event.message}`);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason?.message || String(event.reason || '');
+  log(`Promise rejection: ${reason}`);
+});
+
 log('Tianyi 2.0 Pro VR Teleop frontend loaded');
+
+try {
+  const savedWsUrl = localStorage.getItem('tianyi_ws_url');
+  if (savedWsUrl && !wsUrlInput.value.trim()) {
+    wsUrlInput.value = savedWsUrl;
+  }
+} catch (_) {}
+
 checkXRSupport().then(ok => {
   if (ok) log('WebXR immersive-ar supported');
   else log('WebXR immersive-ar NOT supported — use Quest 3 browser');
 });
 
-// Auto-connect to default WebSocket
-setTimeout(connectWS, 500);
+// Auto-connect only when the user has a URL in the input.
+// This avoids reconnect loops to a stale quick-tunnel address.
+setTimeout(() => {
+  if (wsUrlInput.value.trim()) {
+    connectWS();
+  } else {
+    log('Paste the current wss://...trycloudflare.com backend URL, then click Connect.');
+  }
+}, 500);
 </script>
 </body>
 </html>
