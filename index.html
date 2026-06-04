@@ -416,24 +416,16 @@ btnEnterVR.addEventListener('click', async () => {
     return;
   }
 
-  // Try with body-tracking first, fall back without it
-  let sessionInit = {
-    requiredFeatures: [],
-    optionalFeatures: ['local-floor', 'body-tracking'],
-  };
   try {
-    xrSession = await navigator.xr.requestSession('immersive-ar', sessionInit);
-    log('XR session: immersive-ar + body-tracking');
-  } catch (_err1) {
-    log(`body-tracking init failed (${_err1.message}), retrying without...`);
-    try {
-      sessionInit.optionalFeatures = ['local-floor'];
-      xrSession = await navigator.xr.requestSession('immersive-ar', sessionInit);
-      log('XR session: immersive-ar (no body-tracking)');
-    } catch (err) {
-      log(`immersive-ar failed: ${err.message}`);
-      return;
-    }
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: [],
+      optionalFeatures: ['local-floor'],
+    });
+    log('XR session requested: immersive-ar');
+  } catch (err) {
+    log(`immersive-ar failed: ${err.message}`);
+    log('Passthrough transparency requires immersive-ar. Not falling back to immersive-vr.');
+    return;
   }
 
   try {
@@ -518,31 +510,6 @@ function onXRFrame(timestamp, frame) {
   // Reset tracking flags.
   leftState.valid = false;
   rightState.valid = false;
-
-  // ── IOBT body tracking: elbow positions ────────────────────────────────
-  window.__bodyData = null;
-  if (frame.body && xrRefSpace) {
-    try {
-      const body = frame.body;
-      const joints = ['left-shoulder', 'left-elbow', 'left-wrist',
-                      'right-shoulder', 'right-elbow', 'right-wrist'];
-      const bodyData = {};
-      for (const name of joints) {
-        const joint = body.get(name);
-        if (joint) {
-          const pose = frame.getJointPose(joint, xrRefSpace);
-          if (pose) {
-            bodyData[name] = {
-              pos: { x: pose.transform.position.x, y: pose.transform.position.y, z: pose.transform.position.z },
-              quat: { x: pose.transform.orientation.x, y: pose.transform.orientation.y,
-                      z: pose.transform.orientation.z, w: pose.transform.orientation.w }
-            };
-          }
-        }
-      }
-      if (Object.keys(bodyData).length > 0) window.__bodyData = bodyData;
-    } catch(e) { /* body-tracking not available or still initializing */ }
-  }
 
   try {
     // Process each input source (controller).
@@ -669,9 +636,6 @@ function sendXRState(timestamp, force = false) {
       buttons: rightState.buttons,
       axes: rightState.axes,
     },
-
-    // IOBT body tracking (elbow/shoulder/wrist positions)
-    body: window.__bodyData,
   };
 
   if (CONFIG.debugSendRawInput) {
