@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://barnes-wing-sierra-dreams.trycloudflare.com" placeholder="wss://barnes-wing-sierra-dreams.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://semester-blackjack-sensor-puzzles.trycloudflare.com" placeholder="wss://semester-blackjack-sensor-puzzles.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -416,16 +416,24 @@ btnEnterVR.addEventListener('click', async () => {
     return;
   }
 
+  // Try with body-tracking first, fall back without it
+  let sessionInit = {
+    requiredFeatures: [],
+    optionalFeatures: ['local-floor', 'body-tracking'],
+  };
   try {
-    xrSession = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: [],
-      optionalFeatures: ['local-floor', 'body-tracking'],
-    });
-    log('XR session requested: immersive-ar');
-  } catch (err) {
-    log(`immersive-ar failed: ${err.message}`);
-    log('Passthrough transparency requires immersive-ar. Not falling back to immersive-vr.');
-    return;
+    xrSession = await navigator.xr.requestSession('immersive-ar', sessionInit);
+    log('XR session: immersive-ar + body-tracking');
+  } catch (_err1) {
+    log(`body-tracking init failed (${_err1.message}), retrying without...`);
+    try {
+      sessionInit.optionalFeatures = ['local-floor'];
+      xrSession = await navigator.xr.requestSession('immersive-ar', sessionInit);
+      log('XR session: immersive-ar (no body-tracking)');
+    } catch (err) {
+      log(`immersive-ar failed: ${err.message}`);
+      return;
+    }
   }
 
   try {
