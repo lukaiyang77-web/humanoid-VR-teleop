@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://algorithm-result-build-christmas.trycloudflare.com" placeholder="wss://algorithm-result-build-christmas.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://colleague-agreement-assessment-breakdown.trycloudflare.com" placeholder="wss://colleague-agreement-assessment-breakdown.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -181,13 +181,11 @@ let lastSendErrorAt = 0;
 
 const leftState = {
   valid: false, position: [0,0,0], quaternion: [0,0,0,1],
-  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0],
-  velocity: [0,0,0], rawButtons: [], rawAxes: [],
+  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0], rawButtons: [], rawAxes: [],
 };
 const rightState = {
   valid: false, position: [0,0,0], quaternion: [0,0,0,1],
-  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0],
-  velocity: [0,0,0], rawButtons: [], rawAxes: [],
+  trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0], rawButtons: [], rawAxes: [],
 };
 
 let lastPrimaryRight = false;
@@ -531,25 +529,23 @@ function onXRFrame(timestamp, frame) {
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  // ── E.4 Headset TRANSLATION compensation (no rotation!) ──────────────────
-  // Only subtract headset position delta — NOT rotation.
-  // Full inverse transform couples head rotation into hand position,
-  // which the IK compensates with shoulder_yaw / elbow_yaw → unwanted spin.
-  let headPos = [0, 0, 0];
+  // ── E.4 Headset-local coordinate mapping ──────────────────────────────────
+  // Capture headset pose in local-floor space. When head & hands drift
+  // together (body sway or Quest tracking shift), headset-local positions
+  // stay stable, eliminating systematic arm drift.
+  let headInvPos = [0, 0, 0];
+  let headInvQuat = [0, 0, 0, 1];
   let headValid = false;
   try {
     const viewerPose = frame.getViewerPose(xrRefSpace);
     if (viewerPose) {
       const hp = viewerPose.transform.position;
-      headPos = [hp.x, hp.y, hp.z];
+      const ho = viewerPose.transform.orientation;
+      headInvQuat = quatConjugate([ho.x, ho.y, ho.z, ho.w]);
+      headInvPos = quatRotate([-hp.x, -hp.y, -hp.z], headInvQuat);
       headValid = true;
     }
   } catch (e) { /* fallback to global coords */ }
-
-  // Initialise / reset headset reference on first frame.
-  if (!window.__headStartPos) {
-    window.__headStartPos = headValid ? [...headPos] : [0, 0, 0];
-  }
 
   // Reset tracking flags.
   leftState.valid = false;
@@ -573,63 +569,22 @@ function onXRFrame(timestamp, frame) {
           const pos = pose.transform.position;
           const ori = pose.transform.orientation;
 
-          // E.4: translation-only headset compensation.
-          // Subtracting headset position delta removes body sway / VR drift
-          // WITHOUT coupling head rotation into hand position.
-          let rawPos;
-          if (headValid && window.__headStartPos) {
-            rawPos = [
-              pos.x - (headPos[0] - window.__headStartPos[0]),
-              pos.y - (headPos[1] - window.__headStartPos[1]),
-              pos.z - (headPos[2] - window.__headStartPos[2]),
+          // E.4: transform hand POSITION to headset-local space.
+          //   T_hand_in_head = inv(T_head) * T_hand_in_floor
+          //   localPos = headInvPos + R(headInvQuat) * globalPos
+          // Head movement / Quest drift cancels out — only intentional
+          // hand motion relative to the user's body is sent to the robot.
+          // Quaternion stays in global space so rotation tracking is unaffected.
+          if (headValid) {
+            const rotatedPos = quatRotate([pos.x, pos.y, pos.z], headInvQuat);
+            state.position = [
+              headInvPos[0] + rotatedPos[0],
+              headInvPos[1] + rotatedPos[1],
+              headInvPos[2] + rotatedPos[2],
             ];
           } else {
-            rawPos = [pos.x, pos.y, pos.z];
+            state.position = [pos.x, pos.y, pos.z];
           }
-
-          // ── E.3 Velocity feedforward + low-pass filter ──────────────────
-          // TeleVision-style: compute velocity from position delta, apply
-          // EMA low-pass filter, predict ahead to compensate latency.
-          const side = handedness;
-          const prevKey = '__prevPos_' + side;
-          const prevTimeKey = '__prevTime_' + side;
-          const filtKey = '__filtPos_' + side;
-          const prevPos = window[prevKey];
-          const prevT = window[prevTimeKey];
-          const ALPHA = 0.3;          // EMA smoothing (0=off, 1=no filter)
-          const PREDICT_S = 0.06;     // prediction horizon (60ms)
-
-          let vel = [0, 0, 0];
-          if (prevPos && prevT && timestamp > prevT) {
-            const dt = (timestamp - prevT) / 1000.0;
-            if (dt > 0.001) {
-              vel = [
-                (rawPos[0] - prevPos[0]) / dt,
-                (rawPos[1] - prevPos[1]) / dt,
-                (rawPos[2] - prevPos[2]) / dt,
-              ];
-            }
-          }
-
-          // Low-pass filter
-          const filtPrev = window[filtKey] || rawPos;
-          const filtPos = [
-            filtPrev[0] + ALPHA * (rawPos[0] - filtPrev[0]),
-            filtPrev[1] + ALPHA * (rawPos[1] - filtPrev[1]),
-            filtPrev[2] + ALPHA * (rawPos[2] - filtPrev[2]),
-          ];
-
-          // Predicted position = filtered + velocity * prediction_horizon
-          state.position = [
-            filtPos[0] + vel[0] * PREDICT_S,
-            filtPos[1] + vel[1] * PREDICT_S,
-            filtPos[2] + vel[2] * PREDICT_S,
-          ];
-          state.velocity = vel;
-
-          window[prevKey] = rawPos;
-          window[prevTimeKey] = timestamp;
-          window[filtKey] = filtPos;
           state.quaternion = [ori.x, ori.y, ori.z, ori.w];
         }
       }
@@ -677,22 +632,13 @@ function onXRFrame(timestamp, frame) {
 
   if (rightPrimary && !lastPrimaryRight) {
     controlActive = true;
-    // E.4: capture headset reference at A-press for translation compensation
-    try {
-      const vp = frame.getViewerPose(xrRefSpace);
-      if (vp) {
-        const hp = vp.transform.position;
-        window.__headStartPos = [hp.x, hp.y, hp.z];
-      }
-    } catch(e) {}
     log('A pressed: teleop START');
     updateControlUI();
   }
 
   if (rightSecondary && !lastSecondaryRight) {
     controlActive = false;
-    window.__headStartPos = null;  // reset headset ref for next A-press
-    stopPulseFrames = 6;
+    stopPulseFrames = 6;  // send several frames so backend cannot miss the B event
     log('B pressed: teleop STOP + zero all arm joints');
     updateControlUI();
     sendXRState(timestamp, true);
@@ -737,7 +683,6 @@ function sendXRState(timestamp, force = false) {
       grip: leftState.grip,
       buttons: leftState.buttons,
       axes: leftState.axes,
-      velocity: leftState.velocity,
     },
 
     right: {
@@ -748,7 +693,6 @@ function sendXRState(timestamp, force = false) {
       grip: rightState.grip,
       buttons: rightState.buttons,
       axes: rightState.axes,
-      velocity: rightState.velocity,
     },
   };
 
@@ -858,4 +802,4 @@ setTimeout(() => {
 }, 500);
 </script>
 </body>
-</html>
+</html
