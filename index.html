@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://freely-orientation-extensive-affect.trycloudflare.com" placeholder="wss://freely-orientation-extensive-affect.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://argument-dual-content-orientation.trycloudflare.com" placeholder="wss://argument-dual-content-orientation.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -160,6 +160,38 @@ const CONFIG = {
   // If false, teleop only active while A is held.
   toggleMode: true,
 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  3D math helpers for head-local coordinate transform
+// ══════════════════════════════════════════════════════════════════════════════
+function quatInverse(q) {
+  // Unit quaternion [x,y,z,w] inverse
+  return { x: -q.x, y: -q.y, z: -q.z, w: q.w };
+}
+function quatMultiply(a, b) {
+  return {
+    x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+    y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+    z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+    w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+  };
+}
+function quatRotateVec(q, v) {
+  // Rotate vector v by unit quaternion q. Returns {x, y, z}.
+  const qv = { x: v.x, y: v.y, z: v.z, w: 0 };
+  const qinv = quatInverse(q);
+  const r = quatMultiply(quatMultiply(q, qv), qinv);
+  return { x: r.x, y: r.y, z: r.z };
+}
+function gripToHeadLocal(headPos, headQuat, gripPos, gripQuat) {
+  // Transform grip pose from local-floor to head-local frame.
+  //   T_grip_in_head = inv(T_head) * T_grip
+  const hqi = quatInverse(headQuat);
+  const dp = { x: gripPos.x - headPos.x, y: gripPos.y - headPos.y, z: gripPos.z - headPos.z };
+  const localPos = quatRotateVec(hqi, dp);
+  const localQuat = quatMultiply(hqi, gripQuat);
+  return { position: localPos, quaternion: localQuat };
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  State
@@ -479,28 +511,6 @@ function onInputSourcesChange(event) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  Quaternion math for headset-local coordinate transform (E.4)
-// ══════════════════════════════════════════════════════════════════════════════
-function quatConjugate(q) {
-  return [-q[0], -q[1], -q[2], q[3]];
-}
-function quatMultiply(a, b) {
-  return [
-    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
-    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
-    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
-    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
-  ];
-}
-function quatRotate(v, q) {
-  // Rotate vector v by unit quaternion q:  q * [v,0] * q^(-1)
-  const qv = [v[0], v[1], v[2], 0];
-  const qConj = quatConjugate(q);
-  const r = quatMultiply(quatMultiply(q, qv), qConj);
-  return [r[0], r[1], r[2]];
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 //  XR Frame loop
 // ══════════════════════════════════════════════════════════════════════════════
 function onXRFrame(timestamp, frame) {
@@ -529,29 +539,18 @@ function onXRFrame(timestamp, frame) {
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  // ── E.4 Headset-local coordinate mapping ──────────────────────────────────
-  // Capture headset pose in local-floor space. When head & hands drift
-  // together (body sway or Quest tracking shift), headset-local positions
-  // stay stable, eliminating systematic arm drift.
-  let headInvPos = [0, 0, 0];
-  let headInvQuat = [0, 0, 0, 1];
-  let headValid = false;
-  try {
-    const viewerPose = frame.getViewerPose(xrRefSpace);
-    if (viewerPose) {
-      const hp = viewerPose.transform.position;
-      const ho = viewerPose.transform.orientation;
-      headInvQuat = quatConjugate([ho.x, ho.y, ho.z, ho.w]);
-      headInvPos = quatRotate([-hp.x, -hp.y, -hp.z], headInvQuat);
-      headValid = true;
-    }
-  } catch (e) { /* fallback to global coords */ }
-
   // Reset tracking flags.
   leftState.valid = false;
   rightState.valid = false;
 
-  // IOBT body tracking not available — removed
+  // Get head/viewer pose for head-local coordinate transform.
+  // E.4 Strategy 3: grip poses in head-local space → body turn doesn't move robot.
+  let headPos = null, headQuat = null;
+  const viewerPose = frame.getViewerPose(xrRefSpace);
+  if (viewerPose && viewerPose.transform) {
+    headPos = viewerPose.transform.position;
+    headQuat = viewerPose.transform.orientation;
+  }
 
   try {
     // Process each input source (controller).
@@ -561,31 +560,29 @@ function onXRFrame(timestamp, frame) {
 
       const state = handedness === 'left' ? leftState : rightState;
 
-      // Grip space pose.
+      // Grip space pose — transformed to head-local coordinates.
+      // This implements E.4 Strategy 3: when you turn your body,
+      // the robot does NOT follow the head orientation.
       if (source.gripSpace && xrRefSpace) {
         const pose = frame.getPose(source.gripSpace, xrRefSpace);
         if (pose) {
           state.valid = true;
-          const pos = pose.transform.position;
-          const ori = pose.transform.orientation;
-
-          // E.4: transform hand POSITION to headset-local space.
-          //   T_hand_in_head = inv(T_head) * T_hand_in_floor
-          //   localPos = headInvPos + R(headInvQuat) * globalPos
-          // Head movement / Quest drift cancels out — only intentional
-          // hand motion relative to the user's body is sent to the robot.
-          // Quaternion stays in global space so rotation tracking is unaffected.
-          if (headValid) {
-            const rotatedPos = quatRotate([pos.x, pos.y, pos.z], headInvQuat);
-            state.position = [
-              headInvPos[0] + rotatedPos[0],
-              headInvPos[1] + rotatedPos[1],
-              headInvPos[2] + rotatedPos[2],
-            ];
+          if (headPos && headQuat) {
+            // Convert grip pose from local-floor to head-local frame
+            const local = gripToHeadLocal(
+              headPos, headQuat,
+              pose.transform.position,
+              pose.transform.orientation,
+            );
+            state.position = [local.position.x, local.position.y, local.position.z];
+            state.quaternion = [local.quaternion.x, local.quaternion.y, local.quaternion.z, local.quaternion.w];
           } else {
+            // Fallback: no viewer pose available, use global coordinates
+            const pos = pose.transform.position;
+            const ori = pose.transform.orientation;
             state.position = [pos.x, pos.y, pos.z];
+            state.quaternion = [ori.x, ori.y, ori.z, ori.w];
           }
-          state.quaternion = [ori.x, ori.y, ori.z, ori.w];
         }
       }
 
@@ -802,4 +799,4 @@ setTimeout(() => {
 }, 500);
 </script>
 </body>
-</html
+</html>
