@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://alternatively-event-within-sponsored.trycloudflare.com" placeholder="wss://alternatively-event-within-sponsored.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://parallel-football-products-news.trycloudflare.com" placeholder="wss://parallel-football-products-news.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -586,6 +586,37 @@ function onXRFrame(timestamp, frame) {
             state.position = [pos.x, pos.y, pos.z];
           }
           state.quaternion = [ori.x, ori.y, ori.z, ori.w];
+
+          // E.3: numerical angular velocity from quaternion delta.
+          // Quest 3 browser does NOT expose gp.pose.angularVelocity,
+          // so we estimate it ourselves: rotvec(prev_q → now_q) / dt.
+          const side = handedness; // 'left' or 'right'
+          const prevKey = '__prevQuat_' + side;
+          const prevTimeKey = '__prevTime_' + side;
+          const prevQ = window[prevKey];
+          const prevT = window[prevTimeKey];
+          if (prevQ && prevT && timestamp > prevT) {
+            const dt = (timestamp - prevT) / 1000.0; // ms → s
+            // quaternion difference: q_diff = q_prev^(-1) * q_now
+            const qc = quatConjugate(prevQ);
+            const qd = quatMultiply(qc, [ori.x, ori.y, ori.z, ori.w]);
+            // rotvec from quaternion
+            const angle = 2.0 * Math.acos(Math.min(Math.abs(qd[3]), 1.0));
+            const sinHalf = Math.sin(angle / 2.0);
+            if (sinHalf > 1e-9) {
+              state.angularVelocity = [
+                (qd[0] / sinHalf) * (angle / 2.0) / dt,
+                (qd[1] / sinHalf) * (angle / 2.0) / dt,
+                (qd[2] / sinHalf) * (angle / 2.0) / dt,
+              ];
+            } else {
+              state.angularVelocity = [0, 0, 0];
+            }
+          } else {
+            state.angularVelocity = [0, 0, 0];
+          }
+          window[prevKey] = [ori.x, ori.y, ori.z, ori.w];
+          window[prevTimeKey] = timestamp;
         }
       }
 
@@ -596,16 +627,6 @@ function onXRFrame(timestamp, frame) {
 
         state.trigger = gp.buttons[cfg.trigger]?.value ?? 0;
         state.grip = gp.buttons[cfg.grip]?.value ?? 0;
-
-        // E.3: capture angular velocity from gamepad pose (rad/s).
-        // Used by backend to gate wrist rotation: intentional rotation
-        // has high angular velocity; position-coupling drift has low.
-        if (gp.pose?.angularVelocity) {
-          const av = gp.pose.angularVelocity;
-          state.angularVelocity = [av.x, av.y, av.z];
-        } else {
-          state.angularVelocity = [0, 0, 0];
-        }
 
         state.rawButtons = Array.from(gp.buttons || []).map((b, i) => ({
           i,
@@ -823,4 +844,4 @@ setTimeout(() => {
 }, 500);
 </script>
 </body>
-</html>
+</html
