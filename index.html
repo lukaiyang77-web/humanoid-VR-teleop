@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://theology-crawford-telling-gale.trycloudflare.com" placeholder="wss://theology-crawford-telling-gale.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://generators-orders-exploration-rapids.trycloudflare.com" placeholder="wss://generators-orders-exploration-rapids.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -479,6 +479,28 @@ function onInputSourcesChange(event) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  Quaternion math for headset-local coordinate transform (E.4)
+// ══════════════════════════════════════════════════════════════════════════════
+function quatConjugate(q) {
+  return [-q[0], -q[1], -q[2], q[3]];
+}
+function quatMultiply(a, b) {
+  return [
+    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+  ];
+}
+function quatRotate(v, q) {
+  // Rotate vector v by unit quaternion q:  q * [v,0] * q^(-1)
+  const qv = [v[0], v[1], v[2], 0];
+  const qConj = quatConjugate(q);
+  const r = quatMultiply(quatMultiply(q, qv), qConj);
+  return [r[0], r[1], r[2]];
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  XR Frame loop
 // ══════════════════════════════════════════════════════════════════════════════
 function onXRFrame(timestamp, frame) {
@@ -507,6 +529,24 @@ function onXRFrame(timestamp, frame) {
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
+  // ── E.4 Headset-local coordinate mapping ──────────────────────────────────
+  // Capture headset pose in local-floor space. When head & hands drift
+  // together (body sway or Quest tracking shift), headset-local positions
+  // stay stable, eliminating systematic arm drift.
+  let headInvPos = [0, 0, 0];
+  let headInvQuat = [0, 0, 0, 1];
+  let headValid = false;
+  try {
+    const viewerPose = frame.getViewerPose(xrRefSpace);
+    if (viewerPose) {
+      const hp = viewerPose.transform.position;
+      const ho = viewerPose.transform.orientation;
+      headInvQuat = quatConjugate([ho.x, ho.y, ho.z, ho.w]);
+      headInvPos = quatRotate([-hp.x, -hp.y, -hp.z], headInvQuat);
+      headValid = true;
+    }
+  } catch (e) { /* fallback to global coords */ }
+
   // Reset tracking flags.
   leftState.valid = false;
   rightState.valid = false;
@@ -528,7 +568,23 @@ function onXRFrame(timestamp, frame) {
           state.valid = true;
           const pos = pose.transform.position;
           const ori = pose.transform.orientation;
-          state.position = [pos.x, pos.y, pos.z];
+
+          // E.4: transform hand POSITION to headset-local space.
+          //   T_hand_in_head = inv(T_head) * T_hand_in_floor
+          //   localPos = headInvPos + R(headInvQuat) * globalPos
+          // Head movement / Quest drift cancels out — only intentional
+          // hand motion relative to the user's body is sent to the robot.
+          // Quaternion stays in global space so rotation tracking is unaffected.
+          if (headValid) {
+            const rotatedPos = quatRotate([pos.x, pos.y, pos.z], headInvQuat);
+            state.position = [
+              headInvPos[0] + rotatedPos[0],
+              headInvPos[1] + rotatedPos[1],
+              headInvPos[2] + rotatedPos[2],
+            ];
+          } else {
+            state.position = [pos.x, pos.y, pos.z];
+          }
           state.quaternion = [ori.x, ori.y, ori.z, ori.w];
         }
       }
