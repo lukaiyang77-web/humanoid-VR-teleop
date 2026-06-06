@@ -135,9 +135,9 @@ const CONFIG = {
     trigger: 0,
     grip: 1,
     thumbstickPress: 2,
-    primary: 3,     // A (right) / X (left)
-    secondary: 4,   // B (right) / Y (left)
-    menu: 5,
+    primary: 4,     // A (right) / X (left)
+    secondary: 5,   // B (right) / Y (left)
+    menu: 6,
   },
 
   // Axis indices (thumbstick)
@@ -147,8 +147,8 @@ const CONFIG = {
   },
 
   // Teleop control buttons
-  startButton: { hand: 'right', index: 3 },  // A button = right primary (buttons[3])
-  stopButton:  { hand: 'right', index: 4 },  // B button = right secondary (buttons[4])
+  startButton: { hand: 'right', index: 4 },  // A button = right primary
+  stopButton:  { hand: 'right', index: 5 },  // B button = right secondary
 
   // WebSocket send interval (ms). 33 ~= 30 Hz. Keep this close to backend control_rate_hz.
   sendIntervalMs: 33,
@@ -632,6 +632,16 @@ function onXRFrame(timestamp, frame) {
     }
   } catch (err) {
     log(`XR frame parse error: ${err.message}`);
+  }
+
+  // ── Diagnostic: log raw button state every 60 frames ─────────────────
+  if (window.__xrFrameCount % 60 === 0 && rightState.valid) {
+    // Print raw gamepad button pressed[] to help debug button mapping
+    const rawPressed = rightState.rawButtons
+      .filter(b => b.pressed)
+      .map(b => `[${b.i}]=${b.value.toFixed(2)}`)
+      .join(', ');
+    log(`BTN-DIAG: right raw pressed: ${rawPressed || '(none)'} | cfg.primary=${CONFIG.btnIndex.primary} cfg.secondary=${CONFIG.btnIndex.secondary} | a=${rightState.buttons?.a} b=${rightState.buttons?.b}`);
   }
 
   // Button edge detection for start/stop.
