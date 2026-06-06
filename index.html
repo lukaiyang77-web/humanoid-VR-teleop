@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://yang-adam-pasta-comply.trycloudflare.com" placeholder="wss://yang-adam-pasta-comply.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://nottingham-fusion-provider-respondent.trycloudflare.com" placeholder="wss://nottingham-fusion-provider-respondent.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -501,6 +501,102 @@ function quatRotate(v, q) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  Controller Filter (P0 Step 1+2)
+//  Three-stage pipeline: jump detection → complementary filter + SLERP → dead zone
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Stage 1: Jump detection ──────────────────────────────────────────────────
+const MAX_DELTA_POS = 0.05;       // single-frame >5cm → anomaly
+const MAX_DELTA_ANGLE_DEG = 15;   // single-frame >15° → anomaly
+
+function quatAngleDeg(a, b) {
+  let dot = Math.abs(a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3]);
+  dot = Math.min(dot, 1.0);
+  return 2 * Math.acos(dot) * (180 / Math.PI);
+}
+
+function isPoseValid(newPos, newQuat, lastPos, lastQuat) {
+  if (!lastPos || !lastQuat) return true;
+  const dPos = Math.sqrt(
+    (newPos[0]-lastPos[0])**2 + (newPos[1]-lastPos[1])**2 + (newPos[2]-lastPos[2])**2
+  );
+  if (dPos > MAX_DELTA_POS) return false;
+  const dAngle = quatAngleDeg(newQuat, lastQuat);
+  if (dAngle > MAX_DELTA_ANGLE_DEG) return false;
+  return true;
+}
+
+// ── Stage 2: Complementary filter + SLERP ────────────────────────────────────
+class ControllerFilter {
+  constructor(smoothing = 0.7) {
+    this.s = smoothing;  // 70% old + 30% new
+    this.pos = [0, 0, 0];
+    this.quat = [0, 0, 0, 1];
+    this.ready = false;
+  }
+
+  update(newPos, newQuat) {
+    if (!this.ready) {
+      this.pos = [...newPos];
+      this.quat = [...newQuat];
+      this.ready = true;
+      return { pos: this.pos, quat: this.quat };
+    }
+    // Position: 1st-order low-pass (complementary)
+    this.pos = this.pos.map((v, i) => v * this.s + newPos[i] * (1 - this.s));
+    // Orientation: SLERP (preserves quaternion unit-ness)
+    this.quat = this._slerp(this.quat, newQuat, 1 - this.s);
+    return { pos: this.pos, quat: this.quat };
+  }
+
+  _slerp(a, b, t) {
+    let dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+    if (dot < 0) { b = b.map(v => -v); dot = -dot; }
+    if (dot > 0.9995) {
+      // Small angle: linear interp (safe, close enough to SLERP)
+      return a.map((v, i) => v * (1 - t) + b[i] * t);
+    }
+    const theta0 = Math.acos(dot);
+    const theta = theta0 * t;
+    const sinTheta = Math.sin(theta);
+    const sinTheta0 = Math.sin(theta0);
+    const s0 = Math.cos(theta) - dot * sinTheta / sinTheta0;
+    const s1 = sinTheta / sinTheta0;
+    return a.map((v, i) => v * s0 + b[i] * s1);
+  }
+}
+
+// ── Stage 3: Dead zone ───────────────────────────────────────────────────────
+const DEAD_ZONE_M = 0.003;  // 3mm dead zone
+
+function applyDeadZone(value, lastValue, threshold) {
+  return (Math.abs(value - lastValue) < threshold) ? lastValue : value;
+}
+
+// ── Full pipeline ────────────────────────────────────────────────────────────
+const leftFilter = new ControllerFilter(0.7);
+const rightFilter = new ControllerFilter(0.7);
+let lastValidLeftPos = null, lastValidLeftQuat = null;
+let lastValidRightPos = null, lastValidRightQuat = null;
+let lastRawLeftPos = null, lastRawLeftQuat = null;
+let lastRawRightPos = null, lastRawRightQuat = null;
+
+function processControllerPose(rawPos, rawQuat, filter, lastRawPosRef, lastRawQuatRef, lastValidPosRef, lastValidQuatRef) {
+  // Stage 1: Jump detection
+  if (!isPoseValid(rawPos, rawQuat, lastRawPosRef, lastRawQuatRef)) {
+    console.warn('[VR] Pose jump detected, skipping frame');
+    return { pos: lastValidPosRef, quat: lastValidQuatRef, valid: false };
+  }
+  // Stage 2: Complementary filter + SLERP
+  const f = filter.update(rawPos, rawQuat);
+  // Stage 3: Dead zone
+  if (lastValidPosRef) {
+    f.pos = f.pos.map((v, i) => applyDeadZone(v, lastValidPosRef[i], DEAD_ZONE_M));
+  }
+  return { pos: f.pos, quat: f.quat, valid: true };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  XR Frame loop
 // ══════════════════════════════════════════════════════════════════════════════
 function onXRFrame(timestamp, frame) {
@@ -575,17 +671,45 @@ function onXRFrame(timestamp, frame) {
           // Head movement / Quest drift cancels out — only intentional
           // hand motion relative to the user's body is sent to the robot.
           // Quaternion stays in global space so rotation tracking is unaffected.
+          // Compute raw pose (head-local position, world-space orientation)
+          let rawPos, rawQuat;
           if (headValid) {
             const rotatedPos = quatRotate([pos.x, pos.y, pos.z], headInvQuat);
-            state.position = [
+            rawPos = [
               headInvPos[0] + rotatedPos[0],
               headInvPos[1] + rotatedPos[1],
               headInvPos[2] + rotatedPos[2],
             ];
           } else {
-            state.position = [pos.x, pos.y, pos.z];
+            rawPos = [pos.x, pos.y, pos.z];
           }
-          state.quaternion = [ori.x, ori.y, ori.z, ori.w];
+          rawQuat = [ori.x, ori.y, ori.z, ori.w];
+
+          // P0: Three-stage filter pipeline (jump detect → SLERP filter → dead zone)
+          const isLeft = (handedness === 'left');
+          const filt = isLeft ? leftFilter : rightFilter;
+          const lastRawPos = isLeft ? lastRawLeftPos : lastRawRightPos;
+          const lastRawQuat = isLeft ? lastRawLeftQuat : lastRawRightQuat;
+          const lastValidPos = isLeft ? lastValidLeftPos : lastValidRightPos;
+          const lastValidQuat = isLeft ? lastValidLeftQuat : lastValidRightQuat;
+
+          const result = processControllerPose(
+            rawPos, rawQuat, filt,
+            lastRawPos, lastRawQuat,
+            lastValidPos, lastValidQuat,
+          );
+
+          // Update tracking refs
+          if (isLeft) {
+            lastRawLeftPos = rawPos; lastRawLeftQuat = rawQuat;
+            if (result.valid) { lastValidLeftPos = result.pos; lastValidLeftQuat = result.quat; }
+          } else {
+            lastRawRightPos = rawPos; lastRawRightQuat = rawQuat;
+            if (result.valid) { lastValidRightPos = result.pos; lastValidRightQuat = result.quat; }
+          }
+
+          state.position = result.pos;
+          state.quaternion = result.quat;
         }
       }
 
