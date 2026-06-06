@@ -135,9 +135,9 @@ const CONFIG = {
     trigger: 0,
     grip: 1,
     thumbstickPress: 2,
-    primary: 4,     // A (right) / X (left)
-    secondary: 5,   // B (right) / Y (left)
-    menu: 6,
+    primary: 3,     // A (right) / X (left)
+    secondary: 4,   // B (right) / Y (left)
+    menu: 5,
   },
 
   // Axis indices (thumbstick)
@@ -147,8 +147,8 @@ const CONFIG = {
   },
 
   // Teleop control buttons
-  startButton: { hand: 'right', index: 4 },  // A button = right primary
-  stopButton:  { hand: 'right', index: 5 },  // B button = right secondary
+  startButton: { hand: 'right', index: 3 },  // A button = right primary (buttons[3])
+  stopButton:  { hand: 'right', index: 4 },  // B button = right secondary (buttons[4])
 
   // WebSocket send interval (ms). 33 ~= 30 Hz. Keep this close to backend control_rate_hz.
   sendIntervalMs: 33,
