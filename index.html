@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://confidentiality-day-pressing-removable.trycloudflare.com" placeholder="wss://confidentiality-day-pressing-removable.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://yang-adam-pasta-comply.trycloudflare.com" placeholder="wss://yang-adam-pasta-comply.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -529,14 +529,10 @@ function onXRFrame(timestamp, frame) {
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  // ── P0-1 Head-anchored coordinate mapping ─────────────────────────────────
-  // Capture headset pose in local-floor space. Store both the raw pose
-  // (sent to backend for world-space reconstruction) and its inverse
-  // (used to transform hand positions to head-local space).
-  // When head & hands drift together (body sway or Quest tracking shift),
-  // headset-local positions stay stable, eliminating systematic arm drift.
-  let headPos = [0, 0, 0];
-  let headQuat = [0, 0, 0, 1];
+  // ── E.4 Headset-local coordinate mapping ──────────────────────────────────
+  // Capture headset pose in local-floor space. When head & hands drift
+  // together (body sway or Quest tracking shift), headset-local positions
+  // stay stable, eliminating systematic arm drift.
   let headInvPos = [0, 0, 0];
   let headInvQuat = [0, 0, 0, 1];
   let headValid = false;
@@ -545,10 +541,6 @@ function onXRFrame(timestamp, frame) {
     if (viewerPose) {
       const hp = viewerPose.transform.position;
       const ho = viewerPose.transform.orientation;
-      // Raw head pose (sent to backend in WS message)
-      headPos = [hp.x, hp.y, hp.z];
-      headQuat = [ho.x, ho.y, ho.z, ho.w];
-      // Inverse for head-local hand position transform
       headInvQuat = quatConjugate([ho.x, ho.y, ho.z, ho.w]);
       headInvPos = quatRotate([-hp.x, -hp.y, -hp.z], headInvQuat);
       headValid = true;
@@ -634,16 +626,6 @@ function onXRFrame(timestamp, frame) {
     log(`XR frame parse error: ${err.message}`);
   }
 
-  // ── Diagnostic: log raw button state every 60 frames ─────────────────
-  if (window.__xrFrameCount % 60 === 0 && rightState.valid) {
-    // Print raw gamepad button pressed[] to help debug button mapping
-    const rawPressed = rightState.rawButtons
-      .filter(b => b.pressed)
-      .map(b => `[${b.i}]=${b.value.toFixed(2)}`)
-      .join(', ');
-    log(`BTN-DIAG: right raw pressed: ${rawPressed || '(none)'} | cfg.primary=${CONFIG.btnIndex.primary} cfg.secondary=${CONFIG.btnIndex.secondary} | a=${rightState.buttons?.a} b=${rightState.buttons?.b}`);
-  }
-
   // Button edge detection for start/stop.
   const rightPrimary = rightState.buttons?.a ?? false;
   const rightSecondary = rightState.buttons?.b ?? false;
@@ -692,15 +674,6 @@ function sendXRState(timestamp, force = false) {
     control_active: controlActive,
     reset_reference: false,
     stop_teleop: shouldStop,
-
-    // P0-1: Head pose in local-floor space. Backend uses this + head-local
-    // hand positions to reconstruct world-space hand positions, cancelling
-    // tracking drift and head rotation effects.
-    head: {
-      valid: headValid,
-      position: headPos,
-      quaternion: headQuat,
-    },
 
     left: {
       valid: leftState.valid,
