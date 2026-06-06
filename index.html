@@ -69,7 +69,7 @@
     <h2>Connection</h2>
     <div class="row">
       <label>WebSocket:</label>
-      <input type="text" id="wsUrl" value="wss://nottingham-fusion-provider-respondent.trycloudflare.com" placeholder="wss://nottingham-fusion-provider-respondent.trycloudflare.com">
+      <input type="text" id="wsUrl" value="wss://revenue-interim-checklist-advice.trycloudflare.com" placeholder="wss://revenue-interim-checklist-advice.trycloudflare.com">
       <button id="btnConnect">Connect</button>
     </div>
     <div style="margin-top:6px;font-size:0.78rem;">
@@ -186,6 +186,10 @@ const leftState = {
 const rightState = {
   valid: false, position: [0,0,0], quaternion: [0,0,0,1],
   trigger: 0, grip: 0, buttons: {}, axes: [0,0,0,0], rawButtons: [], rawAxes: [],
+};
+// Head-anchored: raw head pose in world space (module scope for sendXRState access)
+const headState = {
+  valid: false, position: [0,0,0], quaternion: [0,0,0,1],
 };
 
 let lastPrimaryRight = false;
@@ -637,6 +641,11 @@ function onXRFrame(timestamp, frame) {
     if (viewerPose) {
       const hp = viewerPose.transform.position;
       const ho = viewerPose.transform.orientation;
+      // Save to module-scope headState for sendXRState
+      headState.position = [hp.x, hp.y, hp.z];
+      headState.quaternion = [ho.x, ho.y, ho.z, ho.w];
+      headState.valid = true;
+      // Inverse for head-local hand position transform
       headInvQuat = quatConjugate([ho.x, ho.y, ho.z, ho.w]);
       headInvPos = quatRotate([-hp.x, -hp.y, -hp.z], headInvQuat);
       headValid = true;
@@ -798,6 +807,13 @@ function sendXRState(timestamp, force = false) {
     control_active: controlActive,
     reset_reference: false,
     stop_teleop: shouldStop,
+
+    // Head pose in local-floor space (for head-anchored coordinate mapping)
+    head: {
+      valid: headState.valid,
+      position: headState.position,
+      quaternion: headState.quaternion,
+    },
 
     left: {
       valid: leftState.valid,
